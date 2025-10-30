@@ -1,0 +1,59 @@
+name: Delete S3 stack
+on:
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'CloudFormation stack name to delete'
+        required: true
+        default: 'my-s3-stack'
+      region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC role or static keys)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Determine AWS account and compute bucket name
+        id: bucket_info
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          STACK_NAME="${{ github.event.inputs.stack_name }}"
+          BUCKET_NAME="${STACK_NAME}-bucket-${ACCOUNT_ID}"
+          echo "ACCOUNT_ID=${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          echo "BUCKET_NAME=${BUCKET_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Empty S3 bucket (if it exists)
+        run: |
+          set -euo pipefail
+          BUCKET="${{ steps.bucket_info.outputs.BUCKET_NAME }}"
+          REGION="${{ github.event.inputs.region }}"
+          echo "Attempting to empty bucket: $BUCKET in region $REGION (if it exists)"
+          if aws s3 ls "s3://$BUCKET" --region "$REGION" 2>/dev/null; then
+            # Remove all objects and object versions (best-effort)
+            aws s3 rm "s3://$BUCKET" --recursive --region "$REGION" || true
+          else
+            echo "Bucket $BUCKET does not exist or is not accessible, skipping empty step."
+          fi
+
+      - name: Delete CloudFormation stack
+        run: |
+          set -euo pipefail
+          STACK_NAME="${{ github.event.inputs.stack_name }}"
+          REGION="${{ github.event.inputs.region }}"
+          echo "Deleting CloudFormation stack: $STACK_NAME"
+          aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+          echo "Waiting for stack delete to complete..."
+          aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
+          echo "Stack deleted."
